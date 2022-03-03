@@ -6,6 +6,13 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 import os
 import sqlite3
+import re
+import itertools
+import pickle
+import string
+import unicodedata as ud
+from typing import List, Iterable, Generator
+
 
 PUNCTUATION = "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/"
 
@@ -53,10 +60,284 @@ def tokenize(text):
     ans = ans.replace("_", " ")
     return [ w.strip() for w in ans.split(' ') if w.strip() ]
 
-def MiriTokenize(text):
+class VTrie:
+    def __init__(self):
+        self.next = {}
+        self.is_word = False
+        
+
+    def trail_depth(self, word_gen: Generator[str, None, None]) -> int:
+        depth = 0
+        max_depth = depth
+        tmp = self
+        for token in word_gen:
+            if token not in tmp.next:
+                return max_depth
+            tmp = tmp.next[token]
+            depth += 1
+            max_depth = depth if tmp.is_word else max_depth
+        return max_depth
+
+    def extract_words(self, original: str) -> List[str]:
+        sentences = [sentence for sentence in re.split('[!.?,]+', original)]
+        words = []
+        for sentence in sentences:
+            tokens = [token for token in sentence.split(" ") if token.strip() ]
+            if not tokens:
+                continue
+            i = 0
+            while i < len(tokens):
+                tmp = i
+                while tmp < len(tokens) and tokens[tmp][0].isupper():
+                    tmp += 1
+                if tmp != i:
+                    words.append(" ".join(tokens[i:tmp]))
+                i = tmp
+                if i == len(tokens):
+                    break
+                word_gen = itertools.islice(tokens , i, len(tokens))
+                depth = max(1, self.trail_depth(word_gen))
+                words.append(" ".join(tokens[i:i+depth]))
+                i += depth
+        return words
+
+    def has_word(self, word: str) -> bool:
+        tokens = word.split(" ")
+        tmp = self
+        for token in tokens:
+            if token not in tmp.next:
+                return False
+            tmp = tmp.next[token]
+        return tmp.is_word
+
+    def add_word(self, word: str):
+        tokens = word.lower().split(" ")
+        tmp = self
+        for token in tokens:
+            if token not in tmp.next:
+                tmp.next[token] = self.__class__()
+            tmp = tmp.next[token]
+        tmp.is_word = True
+
+class Tokenizer:
+    bi_grams = set()
+    tri_grams = set()
+    model = None
+    with open(os.path.join(os.path.dirname(__file__), 'models', 'vocab.txt'), 'r', encoding='utf-8') as fin:
+        for token in fin.read().split('\n'):
+            tmp = token.split(' ')
+            if len(tmp) == 2:
+                bi_grams.add(token)
+            elif len(tmp) == 3:
+                tri_grams.add(token)
+
+    def __init__(self, kernel):
+        self.load_kernel(kernel)
+
+    def load_kernel(self, kernel):
+        with open(kernel, 'rb') as fin:
+            Tokenizer.model = pickle.load(fin)
+
+    @staticmethod
+    def word2features(sent, i, is_training):
+        word = sent[i][0] if is_training else sent[i]
+        features = {
+            'bias': 1.0,
+            'word.lower()': word.lower(),
+            'word.isupper()': word.isupper(),
+            'word.istitle()': word.istitle(),
+            'word.isdigit()': word.isdigit(),
+        }
+        if i > 0:
+            word1 = sent[i - 1][0] if is_training else sent[i - 1]
+            features.update({
+                '-1:word.lower()': word1.lower(),
+                '-1:word.istitle()': word1.istitle(),
+                '-1:word.isupper()': word1.isupper(),
+                '-1:word.bi_gram()': ' '.join([word1, word]).lower() in Tokenizer.bi_grams,
+            })
+            if i > 1:
+                word2 = sent[i - 2][0] if is_training else sent[i - 2]
+                features.update({
+                    '-2:word.tri_gram()': ' '.join([word2, word1, word]).lower() in Tokenizer.tri_grams,
+                })
+        if i < len(sent) - 1:
+            word1 = sent[i + 1][0] if is_training else sent[i + 1]
+            features.update({
+                '+1:word.lower()': word1.lower(),
+                '+1:word.istitle()': word1.istitle(),
+                '+1:word.isupper()': word1.isupper(),
+                '+1:word.bi_gram()': ' '.join([word, word1]).lower() in Tokenizer.bi_grams,
+            })
+            if i < len(sent) - 2:
+                word2 = sent[i + 2][0] if is_training else sent[i + 2]
+                features.update({
+                    '+2:word.tri_gram()': ' '.join([word, word1, word2]).lower() in Tokenizer.tri_grams,
+                })
+        return features
+
+    @staticmethod
+    def sent2features(sent, is_training):
+        return [Tokenizer.word2features(sent, i, is_training) for i in range(len(sent))]
+
+    @staticmethod
+    def sylabelize(text):
+        text = ud.normalize('NFC', text)
+
+        specials = ["==>", "->", "\.\.\.", ">>",'\n']
+        digit = "\d+([\.,_]\d+)+"
+        email = "([a-zA-Z0-9_.+-]+@([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)"
+        web = "\w+://[^\s]+"
+        word = "\w+"
+        non_word = "[^\w\s]"
+        abbreviations = [
+            "[A-ZĐ]+\.",
+            "Tp\.",
+            "Mr\.", "Mrs\.", "Ms\.",
+            "Dr\.", "ThS\."
+        ]
+
+        patterns = []
+        patterns.extend(abbreviations)
+        patterns.extend(specials)
+        patterns.extend([web, email])
+        patterns.extend([digit, non_word, word])
+
+        patterns = "(" + "|".join(patterns) + ")"
+        if isinstance(patterns,bytes):
+            patterns = patterns.decode('utf-8')
+        tokens = re.findall(patterns, text, re.UNICODE)
+
+        return text, [token[0] for token in tokens]
+
+    @staticmethod
+    def tokenize(str):
+        text, tmp = Tokenizer.sylabelize(str)
+        if len(tmp) == 0:
+            return str
+        labels = Tokenizer.model.predict([Tokenizer.sent2features(tmp, False)])
+        output = tmp[0]
+        for i in range(1, len(labels[0])):
+            if labels[0][i] == 'I_W' and tmp[i] not in string.punctuation and\
+                            tmp[i-1] not in string.punctuation and\
+                    not tmp[i][0].isdigit() and not tmp[i-1][0].isdigit()\
+                    and not (tmp[i][0].istitle() and not tmp[i-1][0].istitle()):
+                output = output + '_' + tmp[i]
+            else:
+                output = output + ' ' + tmp[i]
+        return output
+
+class Tagger:
+    filtered_tags = set(string.punctuation)
+    filtered_tags.add(u'\u2026')
+    filtered_tags.add(u'\u201d')
+    filtered_tags.add(u'\u201c')
+    filtered_tags.add(u'\u2019')
+    filtered_tags.add('...')
+    model = None
+
+    def __init__(self, kernel):
+        self.load_kernel(kernel)
+
+    def load_kernel(self, kernel):
+        with open(kernel, 'rb') as fin:
+            Tagger.model = pickle.load(fin)
+
+    @staticmethod
+    def word2features(sent, i, is_training):
+        word = sent[i][0] if is_training else sent[i]
+
+        features = {
+            'bias': 1.0,
+            'word.lower()': word.lower(),
+            'word.istitle()': word.istitle(),
+            'word.isdigit()': word.isdigit(),
+            'word[:1].isdigit()': word[:1].isdigit(),
+            'word[:3].isupper()': word[:3].isupper(),
+            'word.isfiltered': word in Tagger.filtered_tags,
+        }
+        if i > 0:
+            word1 = sent[i - 1][0] if is_training else sent[i - 1]
+            features.update({
+                '-1:word.lower()': word1.lower(),
+                '-1:word.istitle()': word1.istitle(),
+                '-1:word[:1].isdigit()': word1[:1].isdigit(),
+                '-1:word[:3].isupper()': word1[:3].isupper(),
+            })
+            if i > 1:
+                word2 = sent[i - 2][0] if is_training else sent[i - 2]
+                features.update({
+                    '-2:word.lower()': word2.lower(),
+                    '-2:word.istitle()': word2.istitle(),
+                    '-2:word.isupper()': word2.isupper(),
+                })
+        else:
+            features['BOS'] = True
+        if i < len(sent) - 1:
+            word1 = sent[i + 1][0] if is_training else sent[i + 1]
+            features.update({
+                '+1:word.lower()': word1.lower(),
+                '+1:word.istitle()': word1.istitle(),
+                '+1:word[:1].isdigit()': word1[:1].isdigit(),
+                '+1:word.isupper()': word1.isupper(),
+            })
+            if i < len(sent) - 2:
+                word2 = sent[i + 2][0] if is_training else sent[i + 2]
+                features.update({
+                    '+2:word.lower()': word2.lower(),
+                    '+2:word.istitle()': word2.istitle(),
+                    '+2:word.isupper()': word2.isupper(),
+                })
+        else:
+            features['EOS'] = True
+
+        return features
+
+    @staticmethod
+    def sent2features(sent, is_training):
+        return [Tagger.word2features(sent, i, is_training) for i in range(len(sent))]
+
+    @staticmethod
+    def postagging(str):
+        return Tagger.postagging_tokens(str.split(' '))
+
+    @staticmethod
+    def postagging_tokens(tokens):
+        labels = Tagger.model.predict([Tagger.sent2features(tokens, False)])
+        return tokens, labels[0]
+
+VietTrie = VTrie()
+with open(os.path.join(os.path.dirname(__file__),"models", "vocab.txt"), "r", encoding='utf-8') as f:
+    words = f.readlines()
+words = [ word.strip() for word in words if word.strip() ]
+for word in words:
+    VietTrie.add_word(word)
+
+def MiriTokenize(text, kernel=None):
+    features = VietTrie.extract_words(text.replace('_',' '))
+    for i, v in enumerate(features):
+        tmp = v.split(' ')
+        if tmp[0].lower() in ["ông","bà","anh","chị","em"]:
+            v = ' '.join(tmp[1:])
+            features[i] = v
+    tokens = set([ token for token in features if ' ' in token ])
+    if kernel:
+        tmp = [ word.replace('_',' ') for word in kernel.tokenize(text).split(' ') if '_' in word ]
+        for token in tmp:
+            v = token.split(' ')
+            if v[0].lower() in ["ông","bà","anh","chị","em"]:
+                token = ' '.join(v[1:])
+            if token not in tokens:
+                tokens.add(token)
+    tokens = sorted(tokens,key=len, reverse=True)
+    for token in tokens:
+        text = text.replace(token, token.replace(' ','_'))
+    text = re.sub(r'\s+',' ',text)
     return text
 
-def MiriTagger(text):
+def MiriTagger(text, kernel=None):
+    if kernel:
+        return kernel.postagging(text)
     taggers = [[],[]]
     for word in text.split(' '):
         taggers[0].append(word)
@@ -67,7 +348,8 @@ class MiriAI(Gtk.Window):
     def __init__(self):
         super(MiriAI, self).__init__()
         self.action = "seggment"
-        self.kernel = "seggment"
+        self.tokenize = None
+        self.tagger = None
         self.last_id = -1
         self.entry = None
         self.is_training = False
@@ -210,17 +492,32 @@ class MiriAI(Gtk.Window):
         if tree_iter is not None:
             model = combo.get_model()
             name, _ = model[tree_iter][:2]
-            print("Selected: %s" % name)
         else:
             entry = combo.get_child()
             name = entry.get_text()
-            print("Entered: %s" % name)
         if name.lower() == "mặc định":
-            self.kernel = "%s-base.kernel" % self.action
+            self.load_kernel("base")
         else:
-            self.kernel = "%s.kernel" % self.action
+            self.load_kernel("")
 
-        print('Kernel: %s' % self.kernel)
+    def load_kernel(self, version):
+        if version.strip():
+            version = "-%s" % version
+        kernel = "seggment%s.kernel" % version
+        kernel_path = os.path.join(os.path.dirname(__file__), 'models', kernel)
+        if os.path.isfile(kernel_path):
+            if self.tokenize is None:
+                self.tokenize = Tokenizer(kernel_path)
+            else:
+                self.tokenize.load_kernel(kernel_path)
+
+        kernel = "tagger%s.kernel" % version
+        kernel_path = os.path.join(os.path.dirname(__file__), 'models', kernel)
+        if os.path.isfile(kernel_path):
+            if self.tagger is None:
+                self.tagger = Tagger(kernel_path)
+            else:
+                self.tagger.load_kernel(kernel_path)
 
     def on_traintok_clicked(self, button):
         if self.is_training == False:
@@ -278,14 +575,14 @@ class MiriAI(Gtk.Window):
             text = text.replace('“','"')
             text = normalize_text(text+' ')
             if self.action == "seggment":
-                tokens = MiriTokenize(text).split(' ')
+                tokens = MiriTokenize(text, self.tokenize).split(' ')
                 for i, tok in enumerate(tokens):
                     if '_' in tok:
                         tok = '<b><span color="blue">'+tok+'</span></b>'
                         tokens[i] = tok
                 text = ' '.join(tokens)
             else:
-                result = MiriTagger(MiriTokenize(text))
+                result = MiriTagger(MiriTokenize(text), self.tagger)
                 text = ''
                 for i in range(len(result[0])):
                     text += ' ' + result[0][i]+'<b><span color="blue">/'+result[1][i]+'</span></b>'
