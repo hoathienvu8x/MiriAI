@@ -594,7 +594,8 @@ class MiriAI(Gtk.Window):
                         tokens[i] = tok
                 text = ' '.join(tokens)
             else:
-                result = MiriTagger(MiriTokenize(text, self.tokenize), self.tagger)
+                # result = MiriTagger(MiriTokenize(text, self.tokenize), self.tagger)
+                result = MiriTagger(text.strip(), self.tagger)
                 text = ''
                 for i in range(len(result[0])):
                     text += ' ' + result[0][i]+'<b><span color="blue">/'+result[1][i]+'</span></b>'
