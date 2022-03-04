@@ -13,8 +13,16 @@ import string
 import unicodedata as ud
 from typing import List, Iterable, Generator
 
+TAGS = ['Nc','Ny','Np','Nu','A','C','E','I','L','M','N','P','R','S','T','V','X','F']
 
 PUNCTUATION = "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/"
+
+def has_tagged(word):
+    for tag in TAGS:
+        tag = '/'+tag
+        if word[-len(tag):] == tag:
+            return True
+    return False
 
 def normalize_text(text):
     if '/B_W' in text or '/I_W' in text:
@@ -29,8 +37,7 @@ def normalize_text(text):
             else:
                 text += ' '
             text += word
-    tags = ['Nc','Ny','Np','Nu','A','C','E','I','L','M','N','P','R','S','T','V','X','F']
-    for t in tags:
+    for t in TAGS:
         text = text.replace('/'+t+' ',' ')
     return text.strip()
 
@@ -332,12 +339,16 @@ def MiriTokenize(text, kernel=None):
     tokens = sorted(tokens,key=len, reverse=True)
     for token in tokens:
         text = text.replace(token, token.replace(' ','_'))
+    for ch in string.punctuation:
+        if ch == ' ' or ch == '_':
+            continue
+        text = text.replace(ch, ' '+ch+' ')
     text = re.sub(r'\s+',' ',text)
-    return text
+    return text.strip()
 
 def MiriTagger(text, kernel=None):
     if kernel:
-        return kernel.postagging(text)
+        return kernel.postagging(text.strip())
     taggers = [[],[]]
     for word in text.split(' '):
         taggers[0].append(word)
@@ -559,10 +570,11 @@ class MiriAI(Gtk.Window):
             else:
                 tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
                 for i, tok in enumerate(tokens):
-                    word_tag = tok.split('/')
-                    tag = word_tag.pop()
-                    word = '/'.join(word_tag)
-                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+                    if has_tagged(tok):
+                        word_tag = tok.split('/')
+                        tag = word_tag.pop()
+                        word = '/'.join(word_tag)
+                        tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
             text_buffer = Gtk.TextBuffer()
             self.textview.set_buffer(text_buffer)
             text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
@@ -582,7 +594,7 @@ class MiriAI(Gtk.Window):
                         tokens[i] = tok
                 text = ' '.join(tokens)
             else:
-                result = MiriTagger(MiriTokenize(text), self.tagger)
+                result = MiriTagger(MiriTokenize(text, self.tokenize), self.tagger)
                 text = ''
                 for i in range(len(result[0])):
                     text += ' ' + result[0][i]+'<b><span color="blue">/'+result[1][i]+'</span></b>'
@@ -617,6 +629,12 @@ class MiriAI(Gtk.Window):
                     cur.execute("UPDATE sentences SET tagged = ? WHERE id = ?", [ text, self.last_id ])
                 self.db.commit()
                 if self.db.total_changes >= 0:
+                    if self.entry:
+                        if self.action == "seggment":
+                            self.entry['tokens'] = text
+                        else:
+                            self.entry['tagged'] = text
+                    
                     self.lblState.set_markup('<span color="green">Đã cập nhật %s cho #%d</span>' % ( act, self.last_id))
                 else:
                     self.lblState.set_markup('<span color="brown">Lỗi cập nhật %s cho #%d</span>' % ( act, self.last_id))
@@ -692,10 +710,11 @@ class MiriAI(Gtk.Window):
             else:
                 tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
                 for i, tok in enumerate(tokens):
-                    word_tag = tok.split('/')
-                    tag = word_tag.pop()
-                    word = '/'.join(word_tag)
-                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+                    if has_tagged(tok):
+                        word_tag = tok.split('/')
+                        tag = word_tag.pop()
+                        word = '/'.join(word_tag)
+                        tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
             text_buffer = Gtk.TextBuffer()
             self.textview.set_buffer(text_buffer)
             text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
@@ -737,10 +756,11 @@ class MiriAI(Gtk.Window):
             else:
                 tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
                 for i, tok in enumerate(tokens):
-                    word_tag = tok.split('/')
-                    tag = word_tag.pop()
-                    word = '/'.join(word_tag)
-                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+                    if has_tagged(tok):
+                        word_tag = tok.split('/')
+                        tag = word_tag.pop()
+                        word = '/'.join(word_tag)
+                        tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
             text_buffer = Gtk.TextBuffer()
             self.textview.set_buffer(text_buffer)
             text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
